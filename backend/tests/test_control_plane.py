@@ -4,7 +4,7 @@ from evaluators.orchestrator import run_control_plane
 
 
 async def main():
-    prompt = "Explain photosynthesis in simple terms."
+    prompt = "Answer in exactly 5 words: What is photosynthesis?"
 
     result = await run_control_plane(
         prompt=prompt,
@@ -22,7 +22,7 @@ async def main():
     print("Issues:", evaluation.issues)
 
     print("\n--- DECISION ---")
-    print("Decision:", result["decision"].decision)
+    print("Decision:", result["decision"].decision.value)
     print("Reason:", result["decision"].reason)
     print("Issues:", result["decision"].issues)
 

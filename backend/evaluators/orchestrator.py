@@ -8,8 +8,11 @@ from evaluators.responsibility import (
     redact_pii
 )
 from evaluators.schemas import EvaluationResult
-from decision import make_decision
+from decision import Decision, make_decision
 from gateway import call_llm
+
+
+MAX_EDIT_ATTEMPTS = 1
 
 
 # ---------------------------------------------------------------------------
@@ -17,6 +20,7 @@ from gateway import call_llm
 # ---------------------------------------------------------------------------
 async def check_prompt_safety(prompt: str) -> dict:
     loop = asyncio.get_event_loop()
+
     return await loop.run_in_executor(
         None,
         scan_prompt_for_pii,
@@ -31,7 +35,6 @@ def get_safe_prompt_for_storage(prompt: str) -> str:
 
 # ---------------------------------------------------------------------------
 # STEP 2 — LLM GATEWAY
-# Call the configured LLM provider only after the pre-send check passes.
 # ---------------------------------------------------------------------------
 async def generate_response(prompt: str) -> dict:
     return await call_llm(prompt)
@@ -111,41 +114,108 @@ async def run_parallel_evaluations(
 # POST-RESPONSE EVALUATION
 #       ↓
 # DECISION
+#       ↓
+# EDIT → GATEWAY → EVALUATE → DECIDE (ONE TIME ONLY)
 # ---------------------------------------------------------------------------
 async def run_control_plane(
     prompt: str,
     reference_docs: str = None
 ):
-    # 1. Check prompt BEFORE sending it to the LLM
+    # ---------------------------------------------------------
+    # 1. PRE-SEND SAFETY CHECK
+    # ---------------------------------------------------------
     safety = await check_prompt_safety(prompt)
 
-    # If PII requires user consent, stop here.
-    # The frontend/application should obtain consent and call again.
     if safety.get("requires_consent", False):
         return {
             "status": "CONSENT_REQUIRED",
             "safety": safety
         }
 
-    # 2. Send prompt through the LLM Gateway
+    # ---------------------------------------------------------
+    # 2. INITIAL LLM GENERATION
+    # ---------------------------------------------------------
     gateway_result = await generate_response(prompt)
 
     response = gateway_result["response"]
 
-    # 3. Evaluate the generated response
+    # ---------------------------------------------------------
+    # 3. EVALUATE INITIAL RESPONSE
+    # ---------------------------------------------------------
     evaluation = await run_parallel_evaluations(
         prompt=prompt,
         response=response,
         reference_docs=reference_docs
     )
 
-    # 4. Apply deterministic decision policy
     decision = make_decision(evaluation)
 
+    # ---------------------------------------------------------
+    # 4. EDIT → REGENERATE ONCE
+    # ---------------------------------------------------------
+    if decision.decision == Decision.EDIT:
+
+        edit_prompt = f"""
+Original user request:
+{prompt}
+
+Your previous response was evaluated by a control system.
+
+Issues detected:
+{chr(10).join(decision.issues)}
+
+Reason for editing:
+{decision.reason}
+
+Generate an improved response to the original user request.
+Fix the issues identified above while preserving the useful
+information from the previous response.
+
+Return only the improved response.
+""".strip()
+
+        edited_gateway_result = await generate_response(edit_prompt)
+
+        edited_response = edited_gateway_result["response"]
+
+        # -----------------------------------------------------
+        # 5. EVALUATE THE EDITED RESPONSE AGAIN
+        # -----------------------------------------------------
+        edited_evaluation = await run_parallel_evaluations(
+            prompt=prompt,
+            response=edited_response,
+            reference_docs=reference_docs
+        )
+
+        edited_decision = make_decision(edited_evaluation)
+
+        # -----------------------------------------------------
+        # 6. ONE EDIT ATTEMPT ONLY
+        # -----------------------------------------------------
+        if edited_decision.decision == Decision.EDIT:
+            edited_decision.decision = Decision.ESCALATE
+            edited_decision.reason = (
+                "Response still requires editing after the maximum "
+                "automatic edit attempt."
+            )
+
+        return {
+            "status": "COMPLETED",
+            "response": edited_response,
+            "gateway": edited_gateway_result,
+            "evaluation": edited_evaluation,
+            "decision": edited_decision,
+            "edit_attempts": MAX_EDIT_ATTEMPTS
+        }
+
+    # ---------------------------------------------------------
+    # 7. ALLOW / BLOCK / ESCALATE
+    # ---------------------------------------------------------
     return {
         "status": "COMPLETED",
         "response": response,
         "gateway": gateway_result,
         "evaluation": evaluation,
-        "decision": decision
+        "decision": decision,
+        "edit_attempts": 0
     }
