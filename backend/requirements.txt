@@ -6,3 +6,5 @@ pydantic
 pytest
 fastapi
 uvicorn
+groq
+python-dotenv

@@ -1,60 +1,94 @@
 import asyncio
+
 from evaluators.performance import evaluate_performance
 from evaluators.costs import evaluate_cost
-from evaluators.responsibility import evaluate_responsibility, scan_prompt_for_pii, redact_pii
+from evaluators.responsibility import (
+    evaluate_responsibility,
+    scan_prompt_for_pii,
+    redact_pii
+)
 from evaluators.schemas import EvaluationResult
 from decision import make_decision
-
+from gateway import call_llm
 
 
 # ---------------------------------------------------------------------------
 # STEP 1 — PRE-SEND CHECK
-# Call this BEFORE the prompt is sent to the LLM at all.
-#
-# Backend usage:
-#   safety = await check_prompt_safety(prompt)
-#   if safety["requires_consent"]:
-#       # tell frontend to show the consent pop-up and WAIT for confirmation
-#       # before calling the LLM
-#       ...
-#   # only after consent (or if no PII was found) -> proceed to call the LLM
-#   # with the ORIGINAL, unredacted prompt.
-#   # Whatever gets written to logs/DB/cache for this interaction should use
-#   # redact_pii(prompt) instead of the raw prompt.
 # ---------------------------------------------------------------------------
 async def check_prompt_safety(prompt: str) -> dict:
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, scan_prompt_for_pii, prompt)
+    return await loop.run_in_executor(
+        None,
+        scan_prompt_for_pii,
+        prompt
+    )
 
 
 def get_safe_prompt_for_storage(prompt: str) -> str:
-    """Convenience pass-through so backend doesn't need a separate import
-    just to redact a prompt before logging/caching it."""
+    """Redact PII before storing/logging the prompt."""
     return redact_pii(prompt)
 
 
 # ---------------------------------------------------------------------------
-# STEP 2 — POST-RESPONSE EVALUATION
-# Call this AFTER the LLM has generated a response, to score it on
-# performance, cost, and responsibility before it reaches the user.
+# STEP 2 — LLM GATEWAY
+# Call the configured LLM provider only after the pre-send check passes.
 # ---------------------------------------------------------------------------
-async def run_parallel_evaluations(prompt: str, response: str, reference_docs: str = None) -> EvaluationResult:
-    # Run performance, cost, and responsibility checks concurrently using asyncio
+async def generate_response(prompt: str) -> dict:
+    return await call_llm(prompt)
+
+
+# ---------------------------------------------------------------------------
+# STEP 3 — POST-RESPONSE EVALUATION
+# ---------------------------------------------------------------------------
+async def run_parallel_evaluations(
+    prompt: str,
+    response: str,
+    reference_docs: str = None
+) -> EvaluationResult:
+
     loop = asyncio.get_event_loop()
 
-    perf_task = loop.run_in_executor(None, evaluate_performance, prompt, response, reference_docs)
-    cost_task = loop.run_in_executor(None, evaluate_cost, prompt, response)
-    # NOTE: prompt is now passed through so evaluate_responsibility can tell
-    # the difference between PII the user already provided (echoed, not a
-    # leak) and PII that appears in the response but was never in the
-    # prompt (novel -- genuinely flagged). Without this, every response
-    # PII match falls back to the conservative "flag everything" behavior.
-    resp_task = loop.run_in_executor(None, evaluate_responsibility, response, prompt)
+    perf_task = loop.run_in_executor(
+        None,
+        evaluate_performance,
+        prompt,
+        response,
+        reference_docs
+    )
 
-    perf_res, cost_res, resp_res = await asyncio.gather(perf_task, cost_task, resp_task)
+    cost_task = loop.run_in_executor(
+        None,
+        evaluate_cost,
+        prompt,
+        response
+    )
 
-    all_issues = perf_res["issues"] + cost_res["issues"] + resp_res["issues"]
-    avg_confidence = int((perf_res["score"] + cost_res["score"] + resp_res["score"]) / 3)
+    resp_task = loop.run_in_executor(
+        None,
+        evaluate_responsibility,
+        response,
+        prompt
+    )
+
+    perf_res, cost_res, resp_res = await asyncio.gather(
+        perf_task,
+        cost_task,
+        resp_task
+    )
+
+    all_issues = (
+        perf_res["issues"]
+        + cost_res["issues"]
+        + resp_res["issues"]
+    )
+
+    avg_confidence = int(
+        (
+            perf_res["score"]
+            + cost_res["score"]
+            + resp_res["score"]
+        ) / 3
+    )
 
     return EvaluationResult(
         performance_score=perf_res["score"],
@@ -66,24 +100,52 @@ async def run_parallel_evaluations(prompt: str, response: str, reference_docs: s
         estimated_cost_usd=cost_res["estimated_cost_usd"]
     )
 
+
 # ---------------------------------------------------------------------------
-# STEP 3 — CONTROL PLANE DECISION
-# Run the evaluators, then apply the deterministic decision policy.
+# STEP 4 — COMPLETE CONTROL PLANE
+#
+# PRE-SEND CHECK
+#       ↓
+# LLM GATEWAY
+#       ↓
+# POST-RESPONSE EVALUATION
+#       ↓
+# DECISION
 # ---------------------------------------------------------------------------
 async def run_control_plane(
     prompt: str,
-    response: str,
     reference_docs: str = None
 ):
+    # 1. Check prompt BEFORE sending it to the LLM
+    safety = await check_prompt_safety(prompt)
+
+    # If PII requires user consent, stop here.
+    # The frontend/application should obtain consent and call again.
+    if safety.get("requires_consent", False):
+        return {
+            "status": "CONSENT_REQUIRED",
+            "safety": safety
+        }
+
+    # 2. Send prompt through the LLM Gateway
+    gateway_result = await generate_response(prompt)
+
+    response = gateway_result["response"]
+
+    # 3. Evaluate the generated response
     evaluation = await run_parallel_evaluations(
         prompt=prompt,
         response=response,
         reference_docs=reference_docs
     )
 
+    # 4. Apply deterministic decision policy
     decision = make_decision(evaluation)
 
     return {
+        "status": "COMPLETED",
+        "response": response,
+        "gateway": gateway_result,
         "evaluation": evaluation,
         "decision": decision
     }
