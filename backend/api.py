@@ -2,7 +2,11 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 
 from evaluators.orchestrator import run_control_plane
-from storage import get_dashboard_data
+from storage import (
+    get_dashboard_data,
+    get_escalated_interactions,
+    resolve_escalated_interaction
+)
 
 
 app = FastAPI(title="ControlPlane.ai")
@@ -28,3 +32,19 @@ async def control_plane(request: ControlPlaneRequest):
 def dashboard():
 
     return get_dashboard_data()
+
+@app.get("/api/escalate")
+def escalate():
+
+    return get_escalated_interactions()
+
+@app.patch("/api/escalate/{interaction_id}/{new_decision}")
+def resolve_escalation(
+    interaction_id: int,
+    new_decision: str
+):
+
+    return resolve_escalated_interaction(
+        interaction_id,
+        new_decision
+    )

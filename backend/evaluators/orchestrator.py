@@ -208,7 +208,40 @@ Return only the improved response.
         }
 
     # ---------------------------------------------------------
-    # 5. ALLOW / BLOCK / ESCALATE
+    # 5. BLOCK
+    # ---------------------------------------------------------
+    if decision.decision == Decision.BLOCK:
+
+        blocked_response = (
+            "This response was blocked by the Control Plane.\n\n"
+            "Reasons:\n"
+            + "\n".join(f"- {issue}" for issue in decision.issues)
+        )
+
+        save_interaction(
+            prompt=get_safe_prompt_for_storage(prompt),
+            response=blocked_response,
+            decision=decision.decision.value,
+            performance_score=evaluation.performance_score,
+            cost_score=evaluation.cost_score,
+            safety_score=evaluation.safety_score,
+            confidence=evaluation.confidence,
+            total_tokens=evaluation.total_tokens,
+            estimated_cost_usd=evaluation.estimated_cost_usd,
+            issues=evaluation.issues
+        )
+
+        return {
+            "status": "BLOCKED",
+            "response": blocked_response,
+            "gateway": gateway_result,
+            "evaluation": evaluation,
+            "decision": decision
+        }
+
+
+    # ---------------------------------------------------------
+    # 6. ALLOW / ESCALATE
     # ---------------------------------------------------------
     save_interaction(
         prompt=get_safe_prompt_for_storage(prompt),

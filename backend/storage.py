@@ -183,3 +183,75 @@ def get_dashboard_data():
         "overview": overview_data,
         "recent_interactions": recent_interactions,
     }
+def get_escalated_interactions():
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT
+                    id,
+                    timestamp,
+                    prompt,
+                    response,
+                    performance_score,
+                    cost_score,
+                    safety_score,
+                    confidence,
+                    issues
+                FROM interactions
+                WHERE decision = 'ESCALATE'
+                ORDER BY timestamp DESC;
+            """)
+
+            rows = cur.fetchall()
+
+    return [
+        {
+            "id": row[0],
+            "timestamp": row[1],
+            "prompt": row[2],
+            "response": row[3],
+            "performance_score": row[4],
+            "cost_score": row[5],
+            "safety_score": row[6],
+            "confidence": row[7],
+            "issues": row[8],
+        }
+        for row in rows
+    ]
+
+def resolve_escalated_interaction(
+    interaction_id: int,
+    new_decision: str
+):
+    new_decision = new_decision.upper()
+
+    if new_decision not in ("ALLOW", "BLOCK"):
+        raise ValueError("Decision must be ALLOW or BLOCK")
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                UPDATE interactions
+                SET decision = %s
+                WHERE id = %s
+                  AND decision = 'ESCALATE'
+                RETURNING id, decision;
+                """,
+                (new_decision, interaction_id)
+            )
+
+            result = cur.fetchone()
+
+            if result is None:
+                return {
+                    "status": "NOT_FOUND",
+                    "message": "Escalated interaction not found or already resolved."
+                }
+
+    return {
+        "status": "RESOLVED",
+        "id": result[0],
+        "decision": result[1]
+    }
