@@ -3,3 +3,6 @@ sentence-transformers
 presidio-analyzer
 spacy
 pydantic
+pytest
+fastapi
+uvicorn

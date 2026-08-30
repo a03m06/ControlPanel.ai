@@ -3,6 +3,8 @@ from evaluators.performance import evaluate_performance
 from evaluators.costs import evaluate_cost
 from evaluators.responsibility import evaluate_responsibility, scan_prompt_for_pii, redact_pii
 from evaluators.schemas import EvaluationResult
+from decision import make_decision
+
 
 
 # ---------------------------------------------------------------------------
@@ -63,3 +65,25 @@ async def run_parallel_evaluations(prompt: str, response: str, reference_docs: s
         total_tokens=cost_res["total_tokens"],
         estimated_cost_usd=cost_res["estimated_cost_usd"]
     )
+
+# ---------------------------------------------------------------------------
+# STEP 3 — CONTROL PLANE DECISION
+# Run the evaluators, then apply the deterministic decision policy.
+# ---------------------------------------------------------------------------
+async def run_control_plane(
+    prompt: str,
+    response: str,
+    reference_docs: str = None
+):
+    evaluation = await run_parallel_evaluations(
+        prompt=prompt,
+        response=response,
+        reference_docs=reference_docs
+    )
+
+    decision = make_decision(evaluation)
+
+    return {
+        "evaluation": evaluation,
+        "decision": decision
+    }
