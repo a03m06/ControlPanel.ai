@@ -11,8 +11,7 @@ from evaluators.schemas import EvaluationResult
 from decision import Decision, make_decision
 from gateway import call_llm
 
-
-MAX_EDIT_ATTEMPTS = 1
+from storage import save_interaction
 
 
 # ---------------------------------------------------------------------------
@@ -106,16 +105,6 @@ async def run_parallel_evaluations(
 
 # ---------------------------------------------------------------------------
 # STEP 4 — COMPLETE CONTROL PLANE
-#
-# PRE-SEND CHECK
-#       ↓
-# LLM GATEWAY
-#       ↓
-# POST-RESPONSE EVALUATION
-#       ↓
-# DECISION
-#       ↓
-# EDIT → GATEWAY → EVALUATE → DECIDE (ONE TIME ONLY)
 # ---------------------------------------------------------------------------
 async def run_control_plane(
     prompt: str,
@@ -151,7 +140,7 @@ async def run_control_plane(
     decision = make_decision(evaluation)
 
     # ---------------------------------------------------------
-    # 4. EDIT → REGENERATE ONCE
+    # 4. EDIT → REGENERATE → RE-EVALUATE ONCE
     # ---------------------------------------------------------
     if decision.decision == Decision.EDIT:
 
@@ -178,9 +167,6 @@ Return only the improved response.
 
         edited_response = edited_gateway_result["response"]
 
-        # -----------------------------------------------------
-        # 5. EVALUATE THE EDITED RESPONSE AGAIN
-        # -----------------------------------------------------
         edited_evaluation = await run_parallel_evaluations(
             prompt=prompt,
             response=edited_response,
@@ -189,9 +175,7 @@ Return only the improved response.
 
         edited_decision = make_decision(edited_evaluation)
 
-        # -----------------------------------------------------
-        # 6. ONE EDIT ATTEMPT ONLY
-        # -----------------------------------------------------
+        # If it still needs editing, escalate rather than regenerate again.
         if edited_decision.decision == Decision.EDIT:
             edited_decision.decision = Decision.ESCALATE
             edited_decision.reason = (
@@ -199,23 +183,50 @@ Return only the improved response.
                 "automatic edit attempt."
             )
 
+        # -----------------------------------------------------
+        # SAVE FINAL EDITED RESULT
+        # -----------------------------------------------------
+        save_interaction(
+            prompt=get_safe_prompt_for_storage(prompt),
+            response=edited_response,
+            decision=edited_decision.decision.value,
+            performance_score=edited_evaluation.performance_score,
+            cost_score=edited_evaluation.cost_score,
+            safety_score=edited_evaluation.safety_score,
+            confidence=edited_evaluation.confidence,
+            total_tokens=edited_evaluation.total_tokens,
+            estimated_cost_usd=edited_evaluation.estimated_cost_usd,
+            issues=edited_evaluation.issues
+        )
+
         return {
             "status": "COMPLETED",
             "response": edited_response,
             "gateway": edited_gateway_result,
             "evaluation": edited_evaluation,
-            "decision": edited_decision,
-            "edit_attempts": MAX_EDIT_ATTEMPTS
+            "decision": edited_decision
         }
 
     # ---------------------------------------------------------
-    # 7. ALLOW / BLOCK / ESCALATE
+    # 5. ALLOW / BLOCK / ESCALATE
     # ---------------------------------------------------------
+    save_interaction(
+        prompt=get_safe_prompt_for_storage(prompt),
+        response=response,
+        decision=decision.decision.value,
+        performance_score=evaluation.performance_score,
+        cost_score=evaluation.cost_score,
+        safety_score=evaluation.safety_score,
+        confidence=evaluation.confidence,
+        total_tokens=evaluation.total_tokens,
+        estimated_cost_usd=evaluation.estimated_cost_usd,
+        issues=evaluation.issues
+    )
+
     return {
         "status": "COMPLETED",
         "response": response,
         "gateway": gateway_result,
         "evaluation": evaluation,
-        "decision": decision,
-        "edit_attempts": 0
+        "decision": decision
     }
