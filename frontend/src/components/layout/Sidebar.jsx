@@ -10,7 +10,7 @@ import {
 import ControlPlaneLogo from '../common/ControlPlaneLogo';
 
 export default function Sidebar({ 
-  reviewCount = 5, 
+  reviewCount = 0, 
   isMobileOpen = false, 
   setIsMobileOpen = () => {},
   isCollapsed = false,
@@ -32,10 +32,10 @@ export default function Sidebar({
       badge: null
     },
     {
-      label: 'Review Queue',
+      label: 'Human Review',
       path: '/review',
       icon: MessageSquareWarning,
-      badge: reviewCount > 0 ? String(reviewCount) : '5'
+      badge: reviewCount > 0 ? String(reviewCount) : null
     }
   ];
 

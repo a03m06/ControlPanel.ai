@@ -1,15 +1,14 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useOutletContext } from 'react-router-dom';
-import { 
-  Send, 
-  Zap, 
-  Layers, 
-  Bot, 
+import {
+  Send,
+  Zap,
+  Layers,
+  Bot,
   Check
 } from 'lucide-react';
 
-import { mockPresetScenarios } from '../data/mockEvaluations';
-import { runEvaluation } from '../services/api';
+import { runControlPlane } from '../services/api';
 
 export default function Conversation() {
   const { showToast, refreshReviews } = useOutletContext() || {};
@@ -35,92 +34,148 @@ export default function Conversation() {
   // Handle submitting prompt
   const handleSendMessage = async (customPrompt = null) => {
     const promptToSend = (customPrompt || inputText).trim();
+
     if (!promptToSend || isEvaluating) return;
 
     setInputText('');
 
     // Add user message to conversation
     const userMsgId = `user-${Date.now()}`;
-    const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const timestamp = new Date().toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit'
+    });
 
     const newUserMsg = {
       id: userMsgId,
       sender: 'user',
       text: promptToSend,
-      timestamp: `${timestamp}`
+      timestamp
     };
 
     setMessages((prev) => [...prev, newUserMsg]);
     setIsEvaluating(true);
 
+    // Measure actual frontend round-trip time
+    const requestStart = performance.now();
+
     try {
-      // Find matching preset or generate realistic response
-      let matchedPreset = mockPresetScenarios.find(
-        (p) =>
-          promptToSend &&
-          (p.prompt.toLowerCase().includes(promptToSend.slice(0, 20).toLowerCase()) ||
-            promptToSend.toLowerCase().includes(p.prompt.slice(0, 20).toLowerCase()))
-      );
+      // Send the prompt to the REAL FastAPI ControlPlane backend.
+      //
+      // POST /api/control-plane
+      //
+      // The backend is responsible for:
+      // - processing the prompt
+      // - running the ControlPlane pipeline
+      // - making the decision
+      // - returning the final response
+      const result = await runControlPlane(promptToSend);
 
-      let botResponseText = '';
-      if (matchedPreset) {
-        botResponseText = matchedPreset.response;
-      } else if (promptToSend.toLowerCase().includes('xyz')) {
-        botResponseText = `XYZ Company is a global enterprise solutions provider specializing in cloud infrastructure, cybersecurity protocols, and automated compliance frameworks. Founded in 2012, they have expanded their footprint to over 40 countries, serving primarily Fortune 500 financial and healthcare institutions.
+      const requestLatencyMs = Math.round(performance.now() - requestStart);
 
-Key Competencies:
-> Zero-Trust Architecture: Implementation of secure access service edge (SASE) solutions.
-> Regulatory Compliance AI: Automated GDPR and HIPAA auditing engines.
-> Distributed Ledger Tech: Secure supply chain verification networks.
+      // ------------------------------------------------------------
+      // Normalize the backend response.
+      //
+      // The primary expected response is:
+      // {
+      //   response: "...",
+      //   decision: "...",
+      //   reason: "...",
+      //   evaluation: { ... }
+      // }
+      //
+      // The fallbacks make the UI tolerant of equivalent field names
+      // without changing the backend contract.
+      // ------------------------------------------------------------
 
-Their recent Q3 fiscal report indicates a 22% YoY growth in their cloud division, driven primarily by enterprise migrations to hybrid environments.`;
-      } else if (promptToSend.toLowerCase().includes('ssn') || promptToSend.toLowerCase().includes('john doe')) {
-        botResponseText =
-          'Certainly. Customer John Doe (Account #44091) has SSN: 334-12-8891, Phone: +1 (555) 892-1029, and Personal Email: jdoe.private@gmail.com. Verification status is approved under passport sequence #N994108.';
-      } else if (
-        promptToSend.toLowerCase().includes('roi') ||
-        promptToSend.toLowerCase().includes('yield') ||
-        promptToSend.toLowerCase().includes('bond')
-      ) {
-        botResponseText =
-          'The Tier 3 Fixed Income Bond is guaranteed to deliver a 34.5% risk-free return by Q4 2026, outperforming all regional federal benchmarks according to internal memorandum #881. Investors are fully insulated from credit volatility.';
-      } else {
-        botResponseText = `Based on your query "${promptToSend}", the control engine has analyzed the context against verified operational specifications. All parameters meet established enterprise standards and are ready for downstream consumption.`;
-      }
+      const evaluation = result?.evaluation || {};
 
-      // Run ControlPlane evaluation simulation
-      const evalResult = await runEvaluation(promptToSend, botResponseText);
+      const decision =
+        result?.decision ||
+        result?.final_decision ||
+        evaluation?.decision ||
+        'ALLOW';
+
+      const botResponseText =
+        result?.response ||
+        result?.final_response ||
+        result?.output ||
+        result?.message ||
+        'No response was returned by ControlPlane.';
+
+      const reason =
+        result?.reason ||
+        evaluation?.reason ||
+        '';
+
+      // Prefer actual backend token usage when available.
+      const tokenCount =
+        result?.total_tokens ??
+        evaluation?.total_tokens ??
+        null;
 
       const botMsgId = `bot-${Date.now()}`;
+
       const newBotMsg = {
         id: botMsgId,
         sender: 'bot',
         text: botResponseText,
-        latency: `0.8s`,
-        tokenCount: Math.max(18, Math.round(botResponseText.length / 3.8)),
-        evaluation: evalResult
+
+        // Actual browser round-trip time.
+        latency: requestLatencyMs,
+
+        // Actual backend token count when provided.
+        tokenCount,
+
+        // Keep the complete backend result attached to the message.
+        // Other UI components can use this later for displaying
+        // scores, issues, decisions, etc.
+        evaluation: result
       };
 
       setMessages((prev) => [...prev, newBotMsg]);
 
+      // Refresh the review queue if the backend created/changed
+      // an escalated interaction.
       if (refreshReviews) {
         refreshReviews();
       }
 
+      // Show result notification.
       if (showToast) {
+        const normalizedDecision = String(decision).toUpperCase();
+
         showToast({
-          type: evalResult.decision === 'ALLOW' ? 'success' : evalResult.decision === 'BLOCK' ? 'error' : 'info',
-          title: `Response Evaluated: ${evalResult.decision}`,
-          message: evalResult.reason
+          type:
+            normalizedDecision === 'ALLOW'
+              ? 'success'
+              : normalizedDecision === 'BLOCK'
+                ? 'error'
+                : 'info',
+
+          title: `Response Evaluated: ${decision}`,
+
+          message:
+            reason ||
+            (
+              normalizedDecision === 'ALLOW'
+                ? 'Response allowed by ControlPlane.'
+                : normalizedDecision === 'BLOCK'
+                  ? 'Response blocked by ControlPlane.'
+                  : 'Response requires further review.'
+            )
         });
       }
     } catch (err) {
-      console.error(err);
+      console.error('ControlPlane request failed:', err);
+
       if (showToast) {
         showToast({
           type: 'error',
-          title: 'Evaluation Error',
-          message: err.message || 'Failed to complete evaluation.'
+          title: 'ControlPlane Error',
+          message:
+            err?.message ||
+            'Failed to complete ControlPlane request.'
         });
       }
     } finally {
@@ -131,9 +186,9 @@ Their recent Q3 fiscal report indicates a 22% YoY growth in their cloud division
   return (
     <div className="relative flex flex-col min-h-[calc(100vh-8rem)] justify-between">
       {/* Ambient Celestial Glow Background */}
-      <div 
-        className="pointer-events-none absolute -inset-x-8 -inset-y-12 -z-10 bg-[radial-gradient(ellipse_75%_55%_at_50%_40%,rgba(30,55,110,0.5)_0%,rgba(14,24,50,0.3)_40%,transparent_100%)]" 
-        aria-hidden="true" 
+      <div
+        className="pointer-events-none absolute -inset-x-8 -inset-y-12 -z-10 bg-[radial-gradient(ellipse_75%_55%_at_50%_40%,rgba(30,55,110,0.5)_0%,rgba(14,24,50,0.3)_40%,transparent_100%)]"
+        aria-hidden="true"
       />
 
       {/* 1. Empty State */}
@@ -160,7 +215,7 @@ Their recent Q3 fiscal report indicates a 22% YoY growth in their cloud division
             <button
               type="button"
               onClick={() => handleSendMessage()}
-              disabled={!inputText.trim()}
+              disabled={!inputText.trim() || isEvaluating}
               className="flex items-center gap-1.5 rounded-xl bg-blue-600 px-4 py-2 text-xs font-semibold text-white shadow-md shadow-blue-500/20 hover:bg-blue-500 active:scale-95 transition-all disabled:opacity-40 disabled:cursor-not-allowed shrink-0 cursor-pointer"
             >
               <span>Send</span>
@@ -175,7 +230,9 @@ Their recent Q3 fiscal report indicates a 22% YoY growth in their cloud division
           <div className="flex justify-center pt-2 mb-4">
             <div className="inline-flex items-center gap-1.5 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-4 py-1 text-[11px] font-mono text-[var(--text-muted)] shadow-xs">
               <span className="text-[var(--text-muted)]">SESSION ID:</span>
-              <span className="font-semibold text-[var(--text-primary)]">X8F-992A-B4C</span>
+              <span className="font-semibold text-[var(--text-primary)]">
+                X8F-992A-B4C
+              </span>
             </div>
           </div>
 
@@ -184,13 +241,17 @@ Their recent Q3 fiscal report indicates a 22% YoY growth in their cloud division
             {messages.map((msg) => {
               if (msg.sender === 'user') {
                 return (
-                  <div key={msg.id} className="flex items-start justify-end gap-3 animate-in fade-in">
+                  <div
+                    key={msg.id}
+                    className="flex items-start justify-end gap-3 animate-in fade-in"
+                  >
                     <div className="flex flex-col items-end max-w-xl">
                       <div className="rounded-2xl rounded-tr-xs bg-blue-600 text-white border border-blue-500/40 px-5 py-4 text-sm shadow-md space-y-2">
                         <div>{msg.text}</div>
                       </div>
+
                       <div className="flex items-center gap-1 text-[10px] text-[var(--text-muted)] mt-1 font-mono">
-                        <span>{msg.timestamp || '10:42 AM'}</span>
+                        <span>{msg.timestamp}</span>
                         <Check size={12} className="text-blue-500" />
                         <Check size={12} className="-ml-2 text-blue-500" />
                       </div>
@@ -205,7 +266,10 @@ Their recent Q3 fiscal report indicates a 22% YoY growth in their cloud division
 
               // Bot Message
               return (
-                <div key={msg.id} className="space-y-4 animate-in fade-in">
+                <div
+                  key={msg.id}
+                  className="space-y-4 animate-in fade-in"
+                >
                   <div className="flex items-start gap-3">
                     <div className="relative flex h-8 w-8 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500 to-blue-700 text-white shadow-md shadow-blue-500/20 shrink-0">
                       <Bot size={18} />
@@ -222,11 +286,22 @@ Their recent Q3 fiscal report indicates a 22% YoY growth in their cloud division
                         <div className="mt-4 pt-3 border-t border-[var(--border-subtle)] flex items-center gap-4 text-xs font-mono text-[var(--text-muted)]">
                           <div className="flex items-center gap-1">
                             <Zap size={13} className="text-blue-400" />
-                            <span>0.8s</span>
+
+                            <span>
+                              {msg.latency != null
+                                ? `${(msg.latency / 1000).toFixed(2)}s`
+                                : '—'}
+                            </span>
                           </div>
+
                           <div className="flex items-center gap-1">
                             <Layers size={13} className="text-purple-400" />
-                            <span>{msg.tokenCount || 142} tokens</span>
+
+                            <span>
+                              {msg.tokenCount != null
+                                ? `${msg.tokenCount} tokens`
+                                : '— tokens'}
+                            </span>
                           </div>
                         </div>
                       </div>
@@ -236,18 +311,22 @@ Their recent Q3 fiscal report indicates a 22% YoY growth in their cloud division
               );
             })}
 
-            {/* Evaluation Loading Skeleton */}
+            {/* ControlPlane Loading Skeleton */}
             {isEvaluating && (
               <div className="flex items-start gap-3 animate-pulse">
                 <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-blue-600 text-white shrink-0">
                   <Bot size={18} />
                 </div>
+
                 <div className="flex-1 rounded-2xl bg-[var(--bg-surface)] border border-[var(--border-subtle)] p-5 space-y-3">
                   <div className="h-4 bg-[var(--bg-hover)] rounded w-3/4"></div>
                   <div className="h-4 bg-[var(--bg-hover)] rounded w-1/2"></div>
+
                   <div className="flex items-center gap-2 pt-2 text-xs text-blue-500 font-mono">
                     <span className="h-2 w-2 rounded-full bg-blue-400 animate-ping" />
-                    <span>ControlPlane evaluating conversation prompt...</span>
+                    <span>
+                      ControlPlane evaluating conversation prompt...
+                    </span>
                   </div>
                 </div>
               </div>
